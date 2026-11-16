@@ -1,4 +1,4 @@
-.TH BOX-MIGRATE 1 "November 2026" "Box-Migrate 0.8.8" "User Commands"
+.TH BOX-MIGRATE 1 "November 2026" "Box-Migrate 0.9.0" "User Commands"
 
 .\" ============================================================================
 .SH NAME
@@ -44,6 +44,14 @@ as a separate container.
 .BR \-d ", " \-\-distro " " DISTRO
 Specify the distribution for the destination container.
 This option is required.
+.IP
+Must be a distribution natively supported by
+.BR toolbox\-create (1):
+.BR fedora ,
+.BR rhel ,
+.BR ubuntu ,
+or
+.BR arch .
 
 .TP
 .BR \-r ", " \-\-release " " RELEASE
@@ -95,6 +103,24 @@ distributions. If
 is not already present in the source container, it will be installed there
 before rebuilding the packages.
 
+.TP
+.BR \-w ", " \-\-workdir " " DIR
+Specify the working directory used to store exported package lists,
+repository archives, package caches, rebuilt RPMs, and migration reports.
+.IP
+By default, files are saved to
+.IR ~/box-migrate-SOURCE-to-DESTINATION/ ,
+appending a numbered suffix
+.RI ( \-1 ,
+.IR \-2 ,
+and so on) if the directory already exists. When
+.B \-\-workdir
+is specified, the given directory is used directly and created if it does
+not exist. Because Toolbox containers mount your home directory, choose a
+path inside
+.I $HOME
+so container commands can write to it.
+
 .SS General
 
 .TP
@@ -108,56 +134,76 @@ Display the usage information and exit.
 .TP
 .B Migrate Fedora 44 to Fedora 45
 .nf
-box-migrate f44 f45 -d fedora -r 45
+box-migrate fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45
 .fi
 
 .TP
-.B Preview a migration
+.B Preview a Fedora migration
 .nf
-box-migrate f44 f45 -d fedora -r 45 --dry-run
+box-migrate fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45 --dry-run
 .fi
 
 .TP
-.B Migrate and rebuild standalone local RPMs
+.B Migrate and rebuild standalone local RPMs on Fedora
 .nf
-box-migrate f44 f45 -d fedora -r 45 --rebuild-local
+box-migrate fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45 --rebuild-local
 .fi
 
 .TP
-.B Skip repository migration
+.B Migrate RHEL and save logs to a custom directory
 .nf
-box-migrate f44 f45 -d fedora -r 45 --no-repos
+box-migrate rhel-toolbox-9.4 rhel-toolbox-9.5 -d rhel -r 9.5 -w ~/migrations/rhel-9.5
 .fi
 
 .TP
-.B Skip package cache migration
+.B Migrate Ubuntu without package caches
 .nf
-box-migrate f44 f45 -d fedora -r 45 --no-cache
+box-migrate ubuntu-toolbox-22.04 ubuntu-toolbox-24.04 --distro ubuntu --release 24.04 --no-cache
+.fi
+
+.TP
+.B Migrate Arch Linux without repositories
+.nf
+box-migrate arch-toolbox-latest arch-toolbox-2026 -d arch -r latest --no-repos
 .fi
 
 .TP
 .B Skip both repositories and caches
 .nf
-box-migrate f44 f45 -d fedora -r 45 --no-repos --no-cache
+box-migrate fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45 --no-repos --no-cache
 .fi
 
 .\" ============================================================================
 .SH SUPPORTED DISTRIBUTIONS
 .\" ============================================================================
 
-The source and destination must use compatible package manager families.
+.B box-migrate
+supports only the distributions supported out of the box by
+.BR toolbox\-create (1).
+Custom container images (such as Debian, Rocky Linux, or AlmaLinux) are not
+currently supported.
 
 .TP
 .B DNF
-Fedora, RHEL, CentOS, Rocky Linux, and AlmaLinux.
+.B fedora
+and
+.B rhel
+(allowing migrations such as
+.B fedora
+to
+.BR fedora ,
+or
+.B rhel
+to
+.BR rhel ).
 
 .TP
 .B APT
-Debian and Ubuntu.
+.B ubuntu
 
 .TP
 .B Pacman
-Arch Linux and Manjaro.
+.B arch
 
 .PP
 Cross-family package migration is not supported. Both containers must use
@@ -211,7 +257,7 @@ destination container. Any packages that fail to rebuild are recorded in
 
 When repository migration is enabled, custom repository configuration and
 associated key files are archived from the source and extracted into the
-destination (excluding default Fedora base repository files).
+destination (excluding default Fedora and Ubuntu base repository files).
 .PP
 For DNF-based distributions, release-prefixed source version strings
 (such as
@@ -230,6 +276,14 @@ files are automatically normalized to
 .I $releasever
 so they resolve against the destination release.
 .PP
+For APT-based distributions (Ubuntu), imported third-party repository
+definitions in
+.I /etc/apt/sources.list.d/
+have occurrences of the source release codename (such as
+.IR jammy )
+updated to match the destination release codename (such as
+.IR noble ).
+.PP
 However, third-party repository definitions are not guaranteed to support
 the destination release. Review imported repository files and their signing
 keys before trusting them in the destination container.
@@ -246,12 +300,16 @@ package manager or compatible with its release.
 .\" ============================================================================
 
 .TP
-.I ~/.local/state/box-migrate-SOURCE-to-DESTINATION/
-Working directory containing exported package lists, repository archives,
-package caches, rebuilt RPMs, and migration reports.
+.I ~/box-migrate-SOURCE-to-DESTINATION/
+Default working directory containing exported package lists, repository
+archives, package caches, rebuilt RPMs, and migration reports (unless
+overridden with
+.BR \-w / \-\-workdir ).
 .IP
-If a working directory with the same name already exists, a numbered suffix
-is added.
+If the default working directory already exists, a numbered suffix
+.RI ( \-1 ,
+.IR \-2 ,
+etc.) is added.
 
 .PP
 Important generated files include:
