@@ -1,4 +1,4 @@
-.TH BOX-MIGRATE 1 "November 2026" "Box-Migrate 0.8.7" "User Commands"
+.TH BOX-MIGRATE 1 "November 2026" "Box-Migrate 0.8.8" "User Commands"
 
 .\" ============================================================================
 .SH NAME
@@ -55,7 +55,9 @@ This option is required.
 .TP
 .BR \-n ", " \-\-dry\-run
 Run in dry-run mode. Source package, repository, and cache data are still
-exported, but the destination is not created and packages are not installed.
+exported, but the destination is not created,
+.B rpmrebuild
+is not run, and packages are not installed.
 .IP
 Package comparison uses an empty destination package list, so the displayed
 package count is not a prediction of the final installation count.
@@ -83,7 +85,9 @@ Disable local package cache migration.
 Rebuild and migrate standalone local RPM packages (installed from
 .I @commandline
 without an associated repository) using
-.BR rpmrebuild (1).
+.BR rpmrebuild (1)
+via
+.BR sudo (8).
 .IP
 This option is disabled by default and applies only to DNF-based
 distributions. If
@@ -167,8 +171,7 @@ the same package manager.
 
 The source package list is obtained using the package manager's manually
 installed package records. Packages already installed in the destination
-(matched by exact package name, normalized across multi-arch suffixes) are
-excluded from the installation list.
+(matched by exact package name) are excluded from the installation list.
 .PP
 Package availability depends on the destination distribution and its
 configured repositories. Packages that are unavailable or incompatible are
@@ -191,13 +194,18 @@ destination release or reinstall manually.
 .PP
 When
 .B \-\-rebuild\-local
-is specified,
+is specified, standalone local packages are excluded from the standard
+repository installation pass. Instead,
 .B box\-migrate
 reconstructs binary
 .I .rpm
-archives from the installed files in the source container via
-.BR rpmrebuild (1)
-and installs them into the destination container.
+archives (matched by
+.IR name.arch )
+from the installed files in the source container via
+.B sudo rpmrebuild
+(so restricted root-owned files can be read) and installs them into the
+destination container. Any packages that fail to rebuild are recorded in
+.IR special\-cases.txt .
 
 .SS Repositories and GPG keys
 
@@ -205,9 +213,20 @@ When repository migration is enabled, custom repository configuration and
 associated key files are archived from the source and extracted into the
 destination (excluding default Fedora base repository files).
 .PP
-For DNF-based distributions, hardcoded source release numbers in imported
+For DNF-based distributions, release-prefixed source version strings
+(such as
+.IR fedora-44 ,
+.IR fc44 ,
+or
+.IR el9 )
+in repository URL fields
+.RI ( baseurl ,
+.IR mirrorlist ,
+and
+.IR metalink )
+in imported
 .I .repo
-URLs are automatically normalized to
+files are automatically normalized to
 .I $releasever
 so they resolve against the destination release.
 .PP
@@ -218,9 +237,9 @@ keys before trusting them in the destination container.
 .SS Package caches
 
 When cache migration is enabled, locally cached package files are archived
-from the source and extracted into the destination. Cached files are not
-guaranteed to be usable by the destination package manager or compatible with
-its release.
+from the source and extracted into the destination when cached package files
+are present. Cached files are not guaranteed to be usable by the destination
+package manager or compatible with its release.
 
 .\" ============================================================================
 .SH FILES
@@ -239,7 +258,7 @@ Important generated files include:
 
 .TP
 .I packages.txt
-List of packages selected for migration.
+List of repository packages selected for migration.
 
 .TP
 .I report.txt
@@ -247,8 +266,10 @@ Package installation output, when an installation is attempted.
 
 .TP
 .I special-cases.txt
-Summary of detected missing packages, installation issues, and standalone
-local RPMs.
+Summary of detected missing packages, dependency or transaction issues, and
+standalone local RPMs (including rebuild successes and failures when
+.B \-\-rebuild\-local
+is used).
 
 .TP
 .I repositories.tar.gz
@@ -286,7 +307,8 @@ Bash.
 A working source Toolbox container.
 
 .PP
-The destination container name must not already exist.
+The source and destination container names must differ, and the destination
+container name must not already exist.
 
 .\" ============================================================================
 .SH EXIT STATUS
@@ -302,8 +324,12 @@ were skipped and logged).
 An error occurred during argument validation, container inspection, creation,
 or another pre-installation operation.
 .IP
-A non-zero exit status may occur after the destination container has already
-been created. Inspect the migration logs and container state before retrying.
+If a non-zero exit status occurs after the destination container has already
+been created,
+.B box-migrate
+prints the failing line number and exit code along with a
+.B toolbox rm -f
+cleanup hint. Inspect the migration logs and container state before retrying.
 
 .\" ============================================================================
 .SH NOTES
@@ -321,4 +347,19 @@ unavailable or incompatible. Review the installation report and
 special-cases report after migration.
 .PP
 Dry-run mode does not create the destination or install packages. It still
-creates a working directory and exports data from
+creates a working directory and exports data from the source.
+.PP
+Repository and GPG key archives should be reviewed before being trusted in
+the destination.
+
+.\" ============================================================================
+.SH SEE ALSO
+.\" ============================================================================
+
+.BR toolbox (1),
+.BR podman (1),
+.BR dnf (8),
+.BR rpmrebuild (1),
+.BR sudo (8),
+.BR apt (8),
+.BR pacman (8)

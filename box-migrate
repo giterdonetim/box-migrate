@@ -6,7 +6,7 @@
 
 set -Eeuo pipefail
 
-VERSION="0.8.7"
+VERSION="0.8.8"
 
 SOURCE=""
 DEST=""
@@ -17,15 +17,32 @@ INCLUDE_REPOS=1
 INCLUDE_CACHE=1
 REBUILD_LOCAL=0
 WORKDIR=""
+DEST_CREATED=0
 
 log()  { printf '\033[1;34m[INFO]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*" >&2; }
 fail() { printf '\033[1;31m[ERROR]\033[0m %s\n' "$*" >&2; exit 1; }
 
+on_err() {
+    local exit_code=$?
+    local line_no=$1
+    printf '\033[1;31m[ERROR]\033[0m Script failed at line %s (exit code %s).\n' "$line_no" "$exit_code" >&2
+    if [[ "$DEST_CREATED" -eq 1 && -n "$DEST" ]]; then
+        printf '\033[1;33m[HINT]\033[0m Destination container "%s" was already created. Remove it with: toolbox rm -f %s\n' "$DEST" "$DEST" >&2
+    fi
+    exit "$exit_code"
+}
+trap 'on_err $LINENO' ERR
+
+tar_has_files() {
+    local archive="$1"
+    [[ -s "$archive" ]] && tar -tzf "$archive" 2>/dev/null | grep -q '[^/]$'
+}
+
 usage() {
     local cmd
     cmd="$(basename "$0")"
-    cat <<EOF
+    cat <<USAGE
 Toolbox Migrate v$VERSION
 
 Usage:
@@ -39,14 +56,15 @@ Options:
       --no-repos           Disable custom repository migration
   -C, --cache              Migrate local package caches for manual/offline packages (default: enabled)
       --no-cache           Disable local package cache migration
-  -L, --rebuild-local      Rebuild and migrate standalone local RPMs (@commandline) via rpmrebuild
+  -L, --rebuild-local      Rebuild and migrate standalone local RPMs (@commandline) via sudo rpmrebuild
                            (DNF only; installs rpmrebuild in source container if missing)
   -h, --help               Show help
 
 Examples:
   $cmd f44 f45 -d fedora -r 45 --dry-run
-  $cmd f44 f45 -d fedora -r 45 --rebuild-local$cmd source_cnt dest_cnt --distro fedora --release 45 --no-cache
-EOF
+  $cmd f44 f45 -d fedora -r 45 --rebuild-local
+  $cmd source_cnt dest_cnt --distro fedora --release 45 --no-cache
+USAGE
 }
 
 while [[ $# -gt 0 ]]; do
@@ -124,38 +142,48 @@ SPECIAL_CASES="$WORKDIR/special-cases.txt"
 REPOS="$WORKDIR/repositories.tar.gz"
 PKG_CACHE="$WORKDIR/package-cache.tar.gz"
 LOCAL_RPMS_LIST="$WORKDIR/local_rpms.txt"
+LOCAL_RPMS_NAMES="$WORKDIR/local_rpms_names.txt"
 LOCAL_RPMS_DIR="$WORKDIR/local-rpms"
+REBUILT_OK_LIST="$WORKDIR/rebuilt_ok.txt"
+REBUILT_FAIL_LIST="$WORKDIR/rebuilt_fail.txt"
+MISSING_PKGS_LIST="$WORKDIR/missing_pkgs.txt"
 
-log "Toolbox Migrate v$VERSION $( [[$DRY_RUN -eq 1 ]] && echo "[DRY-RUN MODE]" )"
+DRY_RUN_LABEL=""
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    DRY_RUN_LABEL="[DRY-RUN MODE]"
+fi
+
+log "Toolbox Migrate v$VERSION $DRY_RUN_LABEL"
 log "Source: $SOURCE"
 log "Destination: $DEST"
-log "Options -> Repos: $INCLUDE_REPOS | Cache: $INCLUDE_CACHE \vert{} Rebuild local RPMs:$REBUILD_LOCAL"
+log "Options -> Repos: $INCLUDE_REPOS - Cache: $INCLUDE_CACHE - Rebuild local RPMs: $REBUILD_LOCAL"
 
 # Match exact container name (column 2 of `toolbox list -c`)
-toolbox list -c | awk 'NR>1 {print $2}' \vert{} grep -Fxq "$SOURCE" \
+toolbox list -c | awk 'NR>1 {print $2}' | grep -Fxq "$SOURCE" \
     || fail "Source container not found: $SOURCE"
 
-if toolbox list -c | awk 'NR>1 {print $2}' \vert{} grep -Fxq "$DEST"; then
+if toolbox list -c | awk 'NR>1 {print $2}' | grep -Fxq "$DEST"; then
     fail "Destination container already exists: $DEST"
 fi
 
 log "Detecting source distribution..."
 OS_INFO=$(toolbox run --container "$SOURCE" -- cat /etc/os-release)
-SOURCE_ID=$(printf '\%s\n' "$OS_INFO" | sed -n 's/^ID=//p' | tr -d '"')
-SOURCE_VERSION=$(printf '\%s\n' "$OS_INFO" | sed -n 's/^VERSION_ID=//p' | tr -d '"')
-log "Detected: $SOURCE_ID$SOURCE_VERSION"
+SOURCE_ID=$(printf '%s\n' "$OS_INFO" | sed -n 's/^ID=//p' | tr -d '"')
+SOURCE_VERSION=$(printf '%s\n' "$OS_INFO" | sed -n 's/^VERSION_ID=//p' | tr -d '"')
+log "Detected: $SOURCE_ID $SOURCE_VERSION"
 
 log "Exporting source package list..."
 case "$SOURCE_ID" in
     fedora|rhel|centos|rocky|almalinux)
         PM="dnf"
         toolbox run --container "$SOURCE" -- \
-            dnf repoquery --userinstalled --qf '%{name}\n' \
-            > "$WORKDIR/source_all.txt"
-        toolbox run --container "$SOURCE" -- \
-            dnf repoquery --userinstalled --qf '%{name} %{from_repo}\n' \
-            | awk '$2 == "@commandline" {print $1}' \
+            dnf repoquery --userinstalled --qf '%{name}\t%{name}.%{arch}\t%{from_repo}\n' \
+            > "$WORKDIR/source_repoquery.tsv"
+        cut -f1 "$WORKDIR/source_repoquery.tsv" > "$WORKDIR/source_all.txt"
+        awk -F'\t' '$3 == "@commandline" {print $2}' "$WORKDIR/source_repoquery.tsv" \
             | sort -u > "$LOCAL_RPMS_LIST" || true
+        awk -F'\t' '$3 == "@commandline" {print $1}' "$WORKDIR/source_repoquery.tsv" \
+            | sort -u > "$LOCAL_RPMS_NAMES" || true
         ;;
     debian|ubuntu)
         PM="apt"
@@ -169,3 +197,320 @@ case "$SOURCE_ID" in
         ;;
     *)
         fail "Unsupported source distribution: $SOURCE_ID"
+        ;;
+esac
+
+if [[ "$REBUILD_LOCAL" -eq 1 && "$PM" != "dnf" ]]; then
+    warn "--rebuild-local is only supported for DNF-based distributions; ignoring."
+    REBUILD_LOCAL=0
+fi
+
+if [[ "$INCLUDE_REPOS" -eq 1 ]]; then
+    log "Exporting repository configuration..."
+    case "$PM" in
+        dnf)
+            toolbox run --container "$SOURCE" -- \
+                bash -c 'tar czf - --ignore-failed-read --exclude="fedora.repo" --exclude="fedora-updates.repo" /etc/yum.repos.d /etc/pki/rpm-gpg 2>/dev/null' > "$REPOS" || true
+            ;;
+        apt)
+            toolbox run --container "$SOURCE" -- \
+                bash -c 'tar czf - --ignore-failed-read /etc/apt/sources.list /etc/apt/sources.list.d /etc/apt/keyrings /usr/share/keyrings 2>/dev/null' > "$REPOS" || true
+            ;;
+        pacman)
+            toolbox run --container "$SOURCE" -- \
+                bash -c 'tar czf - --ignore-failed-read /etc/pacman.conf /etc/pacman.d 2>/dev/null' > "$REPOS" || true
+            ;;
+    esac
+fi
+
+if [[ "$INCLUDE_CACHE" -eq 1 ]]; then
+    log "Exporting local package cache..."
+    case "$PM" in
+        dnf)
+            toolbox run --container "$SOURCE" -- \
+                bash -c 'tar czf - --ignore-failed-read /var/cache/libdnf5 /var/cache/dnf 2>/dev/null' > "$PKG_CACHE" || true
+            ;;
+        apt)
+            toolbox run --container "$SOURCE" -- \
+                bash -c 'shopt -s nullglob; files=(/var/cache/apt/archives/*.deb); (( ${#files[@]} )) && tar czf - "${files[@]}" 2>/dev/null' > "$PKG_CACHE" || true
+            ;;
+        pacman)
+            toolbox run --container "$SOURCE" -- \
+                bash -c 'tar czf - --ignore-failed-read /var/cache/pacman/pkg 2>/dev/null' > "$PKG_CACHE" || true
+            ;;
+    esac
+fi
+
+if [[ "$REBUILD_LOCAL" -eq 1 && -s "$LOCAL_RPMS_LIST" ]]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        log "[DRY-RUN] Would rebuild the following standalone local RPMs from $SOURCE:"
+        sed 's/^/  - /' "$LOCAL_RPMS_LIST"
+    else
+        log "Rebuilding standalone local RPMs from source container..."
+        mkdir -p "$LOCAL_RPMS_DIR"
+        : > "$REBUILT_OK_LIST"
+        : > "$REBUILT_FAIL_LIST"
+        if ! toolbox run --container "$SOURCE" -- command -v rpmrebuild >/dev/null 2>&1; then
+            log "Installing rpmrebuild in source container $SOURCE..."
+            toolbox run --container "$SOURCE" -- sudo dnf install -y rpmrebuild
+        fi
+        while IFS= read -r local_pkg; do
+            [[ -z "$local_pkg" ]] && continue
+            log "Rebuilding local RPM: $local_pkg"
+            if rebuild_out=$(toolbox run --container "$SOURCE" -- \
+                sudo rpmrebuild -bn --define '_binary_payload w2.zstdio' --directory="$LOCAL_RPMS_DIR" "$local_pkg" </dev/null 2>&1); then
+                echo "$local_pkg" >> "$REBUILT_OK_LIST"
+            else
+                err_line=$(printf '%s\n' "$rebuild_out" | grep -E 'ERROR|error:' | tail -n 1 || true)
+                warn "Failed to rebuild local RPM: $local_pkg ${err_line:+($err_line)}"
+                echo "$local_pkg${err_line:+ — $err_line}" >> "$REBUILT_FAIL_LIST"
+            fi
+        done < "$LOCAL_RPMS_LIST"
+    fi
+fi
+
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    log "[DRY-RUN] Would create destination container: toolbox create --container $DEST --distro $DISTRO --release $RELEASE"
+    log "[DRY-RUN] Simulating destination package manager inspection..."
+    DEST_ID="$DISTRO"
+    DEST_PM="$PM"
+    touch "$WORKDIR/dest_installed.txt"
+else
+    log "Creating destination container..."
+    toolbox create --container "$DEST" --distro "$DISTRO" --release "$RELEASE"
+    DEST_CREATED=1
+    log "Destination container created."
+
+    DEST_INFO=$(toolbox run --container "$DEST" -- cat /etc/os-release)
+    DEST_ID=$(printf '%s\n' "$DEST_INFO" | sed -n 's/^ID=//p' | tr -d '"')
+
+    case "$DEST_ID" in
+        fedora|rhel|centos|rocky|almalinux) DEST_PM="dnf" ;;
+        debian|ubuntu) DEST_PM="apt" ;;
+        arch|manjaro) DEST_PM="pacman" ;;
+        *) fail "Unsupported destination distribution: $DEST_ID" ;;
+    esac
+fi
+
+if [[ "$PM" != "$DEST_PM" ]]; then
+    fail "Package managers differ ($PM vs $DEST_PM). Cross-family migrations cannot auto-install packages directly."
+fi
+
+if [[ "$INCLUDE_REPOS" -eq 1 ]] && tar_has_files "$REPOS"; then
+    log "Restoring and sanitizing repository configuration in destination..."
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        log "[DRY-RUN] Would restore repositories and normalize release variables"
+    else
+        toolbox run --container "$DEST" -- \
+            sudo bash -c 'tar xzf - -C /' < "$REPOS" 2>/dev/null || true
+
+        if [[ "$DEST_PM" == "dnf" && -n "$SOURCE_VERSION" ]]; then
+            toolbox run --container "$DEST" -- \
+                sudo bash -c "sed -i -E '/^(baseurl|mirrorlist|metalink)=/ s/(fedora[-/]|fc|el)${SOURCE_VERSION}([-/]|$)/\1\$releasever\2/g' /etc/yum.repos.d/*.repo 2>/dev/null || true"
+        fi
+    fi
+else
+    log "Repository migration skipped or no custom repos found."
+fi
+
+if [[ "$INCLUDE_CACHE" -eq 1 ]] && tar_has_files "$PKG_CACHE"; then
+    log "Restoring local package cache into destination..."
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        log "[DRY-RUN] Would restore local package cache into container $DEST"
+    else
+        toolbox run --container "$DEST" -- \
+            sudo bash -c 'tar xzf - -C /' < "$PKG_CACHE" 2>/dev/null || true
+    fi
+else
+    log "Package cache migration skipped or no cached packages found."
+fi
+
+log "Filtering out base packages already present in destination..."
+if [[ "$DRY_RUN" -eq 0 ]]; then
+    case "$DEST_PM" in
+        dnf)
+            toolbox run --container "$DEST" -- \
+                dnf repoquery --installed --qf '%{name}\n' \
+                > "$WORKDIR/dest_installed.txt"
+            ;;
+        apt)
+            toolbox run --container "$DEST" -- \
+                dpkg-query -W -f='${Package}\n' \
+                > "$WORKDIR/dest_installed.txt"
+            ;;
+        pacman)
+            toolbox run --container "$DEST" -- \
+                pacman -Qq > "$WORKDIR/dest_installed.txt"
+            ;;
+    esac
+fi
+
+# Exclude standalone local RPMs from the main repo pass when --rebuild-local is enabled
+if [[ "$REBUILD_LOCAL" -eq 1 && -s "$LOCAL_RPMS_NAMES" ]]; then
+    comm -23 <(sort -u "$WORKDIR/source_all.txt") <(sort -u "$WORKDIR/dest_installed.txt" "$LOCAL_RPMS_NAMES") \
+        > "$PACKAGES"
+else
+    comm -23 <(sort -u "$WORKDIR/source_all.txt") <(sort -u "$WORKDIR/dest_installed.txt") \
+        > "$PACKAGES"
+fi
+
+PACKAGE_COUNT=$(grep -cve '^$' "$PACKAGES" || true)
+PACKAGE_COUNT=${PACKAGE_COUNT:-0}
+log "Found $PACKAGE_COUNT truly extra repository packages to migrate."
+
+if [[ "$PACKAGE_COUNT" -gt 0 ]]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        log "[DRY-RUN] Would install the following packages in $DEST:"
+        sed 's/^/  - /' "$PACKAGES"
+    else
+        log "Installing extra packages in destination..."
+        case "$DEST_PM" in
+            dnf)
+                mapfile -t PKG_ARRAY < "$PACKAGES"
+                toolbox run --container "$DEST" -- \
+                    sudo dnf install -y --skip-unavailable "${PKG_ARRAY[@]}" \
+                    2>&1 | tee "$REPORT" || true
+                ;;
+            apt)
+                toolbox run --container "$DEST" -- sudo apt-get update
+                toolbox run --container "$DEST" -- \
+                    sudo xargs -r apt-get install -y --no-install-recommends < "$PACKAGES" \
+                    2>&1 | tee "$REPORT" || true
+                ;;
+            pacman)
+                mapfile -t PKG_ARRAY < "$PACKAGES"
+                toolbox run --container "$DEST" -- \
+                    sudo pacman -Sy --needed --noconfirm --asexplicit \
+                    "${PKG_ARRAY[@]}" 2>&1 | tee "$REPORT" || true
+                ;;
+        esac
+    fi
+fi
+
+if [[ "$REBUILD_LOCAL" -eq 1 && "$DRY_RUN" -eq 0 && -d "$LOCAL_RPMS_DIR" ]]; then
+    mapfile -t REBUILT_FILES < <(find "$LOCAL_RPMS_DIR" -type f -name '*.rpm' | sort)
+    if [[ "${#REBUILT_FILES[@]}" -gt 0 ]]; then
+        log "Installing ${#REBUILT_FILES[@]} rebuilt local RPM(s) in destination..."
+        toolbox run --container "$DEST" -- \
+            sudo dnf install -y --skip-unavailable "${REBUILT_FILES[@]}" \
+            2>&1 | tee -a "$REPORT" || true
+    fi
+fi
+
+describe_missing_pkg() {
+    local pkg="$1"
+    case "$PM" in
+        dnf)
+            local info repo url summary
+            info=$(toolbox run --container "$SOURCE" -- \
+                dnf repoquery --installed --qf '%{from_repo}\t%{url}\t%{summary}' "$pkg" </dev/null 2>/dev/null | head -n 1 || true)
+            if [[ -n "$info" ]]; then
+                IFS=$'\t' read -r repo url summary <<< "$info"
+                echo "  - $pkg"
+                echo "      Source repo: ${repo:-unknown}"
+                echo "      URL:         ${url:-none}"
+                echo "      Summary:     ${summary:-none}"
+            else
+                echo "  - $pkg (metadata unavailable in source)"
+            fi
+            ;;
+        apt)
+            local info url summary
+            info=$(toolbox run --container "$SOURCE" -- \
+                dpkg-query -W -f='${Homepage}\t${binary:Summary}\n' "$pkg" </dev/null 2>/dev/null | head -n 1 || true)
+            if [[ -n "$info" ]]; then
+                IFS=$'\t' read -r url summary <<< "$info"
+                echo "  - $pkg"
+                echo "      URL:     ${url:-none}"
+                echo "      Summary: ${summary:-none}"
+            else
+                echo "  - $pkg"
+            fi
+            ;;
+        pacman)
+            local url summary
+            url=$(toolbox run --container "$SOURCE" -- pacman -Qi "$pkg" </dev/null 2>/dev/null | sed -n 's/^URL[[:space:]]*:[[:space:]]*//p' | head -n 1 || true)
+            summary=$(toolbox run --container "$SOURCE" -- pacman -Qi "$pkg" </dev/null 2>/dev/null | sed -n 's/^Description[[:space:]]*:[[:space:]]*//p' | head -n 1 || true)
+            echo "  - $pkg"
+            echo "      URL:     ${url:-none}"
+            echo "      Summary: ${summary:-none}"
+            ;;
+    esac
+}
+
+{
+    echo "=== Toolbox Migration Special Cases & Skipped Packages Report ==="
+    echo "Timestamp: $(date)"
+    echo "Source: $SOURCE -> Destination: $DEST (Dry-run: $DRY_RUN)"
+    echo "Repos enabled: $INCLUDE_REPOS - Cache enabled: $INCLUDE_CACHE - Rebuild local: $REBUILD_LOCAL"
+    echo ""
+    echo "[Unavailable / Missing Packages & Where to Find Them]:"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo "Dry-run mode: No actual installation attempted."
+    elif [[ -f "$REPORT" ]]; then
+        grep -E "No match for argument:|Unable to locate package |has no installation candidate|target not found: " "$REPORT" \
+            | sed -E "s/.*(No match for argument: |Unable to locate package |Package '|target not found: )//; s/' has no installation candidate//" \
+            | awk '{print $1}' | sort -u > "$MISSING_PKGS_LIST" || true
+
+        OTHER_ISSUES=$(grep -E "Failed to resolve|conflicting requests" "$REPORT" || true)
+
+        if [[ -s "$MISSING_PKGS_LIST" ]]; then
+            while IFS= read -r missing_pkg; do
+                [[ -z "$missing_pkg" ]] && continue
+                describe_missing_pkg "$missing_pkg"
+            done < "$MISSING_PKGS_LIST"
+        fi
+
+        if [[ -n "$OTHER_ISSUES" ]]; then
+            echo ""
+            echo "[Dependency / Transaction Issues]:"
+            printf '%s\n' "$OTHER_ISSUES"
+        fi
+
+        if [[ ! -s "$MISSING_PKGS_LIST" && -z "$OTHER_ISSUES" ]]; then
+            echo "None detected."
+        fi
+    else
+        echo "No report generated."
+    fi
+    echo ""
+    if [[ "$REBUILD_LOCAL" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
+        echo "[External / Local RPMs (Successfully Rebuilt via rpmrebuild)]:"
+        if [[ -s "$REBUILT_OK_LIST" ]]; then
+            cat "$REBUILT_OK_LIST"
+        else
+            echo "None."
+        fi
+        if [[ -s "$REBUILT_FAIL_LIST" ]]; then
+            echo ""
+            echo "[External / Local RPMs (Failed to Rebuild - Reinstall Manually)]:"
+            cat "$REBUILT_FAIL_LIST"
+        fi
+    else
+        echo "[External / Local RPMs (Installed Without a Repo - Reinstall Manually or Use --rebuild-local)]:"
+        if [[ -s "$LOCAL_RPMS_LIST" ]]; then
+            cat "$LOCAL_RPMS_LIST"
+        else
+            echo "None detected."
+        fi
+    fi
+} > "$SPECIAL_CASES"
+
+log "Migration process finished successfully."
+
+echo
+echo "=================================================="
+echo "        MIGRATION SUMMARY & SPECIAL CASES         "
+echo "=================================================="
+echo "Package manifest:      $PACKAGES"
+echo "Full installation log: $REPORT"
+echo "Special cases log:     $SPECIAL_CASES"
+echo "--------------------------------------------------"
+if [[ -s "$SPECIAL_CASES" ]]; then
+    while IFS= read -r line; do
+        warn "$line"
+    done < "$SPECIAL_CASES"
+else
+    log "No special cases or errors encountered."
+fi
+echo "=================================================="
