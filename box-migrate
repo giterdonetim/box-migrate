@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Toolbox Migrate
-# Seed a new destination Toolbox container with packages, repositories, 
+# Seed a new destination Toolbox container with packages, repositories,
 # and caches from an existing source container.
 
 set -Eeuo pipefail
@@ -122,9 +122,11 @@ log "Source: $SOURCE"
 log "Destination: $DEST"
 log "Options -> Repos: $INCLUDE_REPOS | Cache: $INCLUDE_CACHE"
 
-toolbox list -c | grep -Fq "$SOURCE" || fail "Source container not found: $SOURCE"
+# Match exact container name (column 2 of `toolbox list -c`)
+toolbox list -c | awk 'NR>1 {print $2}' | grep -Fxq "$SOURCE" \
+    || fail "Source container not found: $SOURCE"
 
-if toolbox list -c | grep -Fq "$DEST"; then
+if toolbox list -c | awk 'NR>1 {print $2}' | grep -Fxq "$DEST"; then
     fail "Destination container already exists: $DEST"
 fi
 
@@ -162,15 +164,15 @@ if [[ "$INCLUDE_REPOS" -eq 1 ]]; then
     case "$PM" in
         dnf)
             toolbox run --container "$SOURCE" -- \
-                bash -c 'tar czf - --ignore-failed-read --exclude="fedora.repo" --exclude="fedora-updates.repo" /etc/yum.repos.d /etc/pki/rpm-gpg 2>/dev/null' > "$REPOS"
+                bash -c 'tar czf - --ignore-failed-read --exclude="fedora.repo" --exclude="fedora-updates.repo" /etc/yum.repos.d /etc/pki/rpm-gpg 2>/dev/null' > "$REPOS" || true
             ;;
         apt)
             toolbox run --container "$SOURCE" -- \
-                bash -c 'tar czf - --ignore-failed-read /etc/apt/sources.list /etc/apt/sources.list.d /etc/apt/keyrings /usr/share/keyrings 2>/dev/null' > "$REPOS"
+                bash -c 'tar czf - --ignore-failed-read /etc/apt/sources.list /etc/apt/sources.list.d /etc/apt/keyrings /usr/share/keyrings 2>/dev/null' > "$REPOS" || true
             ;;
         pacman)
             toolbox run --container "$SOURCE" -- \
-                bash -c 'tar czf - --ignore-failed-read /etc/pacman.conf /etc/pacman.d 2>/dev/null' > "$REPOS"
+                bash -c 'tar czf - --ignore-failed-read /etc/pacman.conf /etc/pacman.d 2>/dev/null' > "$REPOS" || true
             ;;
     esac
 fi
@@ -222,17 +224,14 @@ fi
 if [[ "$INCLUDE_REPOS" -eq 1 && -s "$REPOS" ]]; then
     log "Restoring and sanitizing repository configuration in destination..."
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        log "[DRY-RUN] Would restore repositories and update release variables to $RELEASE"
+        log "[DRY-RUN] Would restore repositories and normalize release variables"
     else
         toolbox run --container "$DEST" -- \
-            sudo bash -c 'tar xzf - -C /' < "$REPOS"
-        
-        if [[ "$DEST_PM" == "dnf" ]]; then
+            sudo bash -c 'tar xzf - -C /' < "$REPOS" 2>/dev/null || true
+
+        if [[ "$DEST_PM" == "dnf" && -n "$SOURCE_VERSION" ]]; then
             toolbox run --container "$DEST" -- \
-                sudo bash -c "
-                    sed -i 's/\$releasever/$RELEASE/g' /etc/yum.repos.d/*.repo 2>/dev/null || true
-                    sed -i -E 's/(fedora\/)[0-9]+(\/)/\1$RELEASE\2/g' /etc/yum.repos.d/*.repo 2>/dev/null || true
-                "
+                sudo bash -c "sed -i -E 's/(fedora[-/]|fc)${SOURCE_VERSION}([-/]|$)/\1\$releasever\2/g' /etc/yum.repos.d/*.repo 2>/dev/null || true"
         fi
     fi
 else
@@ -259,7 +258,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
             ;;
         apt)
             toolbox run --container "$DEST" -- \
-                dpkg --get-selections | awk '{print $1}' \
+                dpkg-query -W -f='${Package}\n' \
                 > "$WORKDIR/dest_installed.txt"
             ;;
         pacman)
@@ -269,7 +268,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
     esac
 fi
 
-comm -23 <(sort "$WORKDIR/source_all.txt") <(sort "$WORKDIR/dest_installed.txt") \
+comm -23 <(sort -u "$WORKDIR/source_all.txt") <(sort -u "$WORKDIR/dest_installed.txt") \
     > "$PACKAGES"
 
 PACKAGE_COUNT=$(grep -cve '^$' "$PACKAGES" || true)
@@ -286,19 +285,19 @@ if [[ "$PACKAGE_COUNT" -gt 0 ]]; then
                 mapfile -t PKG_ARRAY < "$PACKAGES"
                 toolbox run --container "$DEST" -- \
                     sudo dnf install -y --skip-unavailable "${PKG_ARRAY[@]}" \
-                    2>&1 | tee "$REPORT"
+                    2>&1 | tee "$REPORT" || true
                 ;;
             apt)
                 toolbox run --container "$DEST" -- sudo apt-get update
                 toolbox run --container "$DEST" -- \
                     sudo xargs -r apt-get install -y --no-install-recommends < "$PACKAGES" \
-                    2>&1 | tee "$REPORT"
+                    2>&1 | tee "$REPORT" || true
                 ;;
             pacman)
                 mapfile -t PKG_ARRAY < "$PACKAGES"
                 toolbox run --container "$DEST" -- \
                     sudo pacman -Sy --needed --noconfirm --asexplicit \
-                    "${PKG_ARRAY[@]}" 2>&1 | tee "$REPORT"
+                    "${PKG_ARRAY[@]}" 2>&1 | tee "$REPORT" || true
                 ;;
         esac
     fi
@@ -314,7 +313,7 @@ fi
     if [[ "$DRY_RUN" -eq 1 ]]; then
         echo "Dry-run mode: No actual installation attempted."
     elif [[ -f "$REPORT" ]]; then
-        grep -E "No match for argument|Failed to resolve|conflicting requests|Package .* is already installed" "$REPORT" || echo "None detected."
+        grep -E "No match for argument|Failed to resolve|conflicting requests|Unable to locate package|target not found|Package .* is already installed" "$REPORT" || echo "None detected."
     else
         echo "No report generated."
     fi
