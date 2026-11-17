@@ -1,10 +1,10 @@
-.TH BOX-MIGRATE 1 "November 2026" "Box-Migrate 0.9.0" "User Commands"
+.TH BOX-MIGRATE 1 "November 2026" "Box-Migrate 0.9.5" "User Commands"
 
 .\" ============================================================================
 .SH NAME
 .\" ============================================================================
 
-box-migrate \- migrate packages, repositories, and caches between Toolbox containers
+box-migrate \- upgrade and migrate packages, repositories, and caches between Toolbox containers
 
 .\" ============================================================================
 .SH SYNOPSIS
@@ -19,400 +19,164 @@ box-migrate \- migrate packages, repositories, and caches between Toolbox contai
 .\" ============================================================================
 
 .B box-migrate
-migrates manually installed packages from an existing Linux Toolbox container
-to a newly created destination container.
+creates a new Toolbox container at a newer release and populates it with 
+the packages from an existing container, saving you from reinstalling everything by hand.
 .PP
-The destination is created using the specified distribution and release.
-Box-Migrate identifies the source package manager, exports its manually
-installed package list, compares it against packages already installed in
-the destination, and installs packages not already present.
+Particularly useful on immutable systems like Fedora Silverblue, 
+.B box-migrate
+reads the packages explicitly installed in your source container, checks what is already 
+present in the new destination container, and installs the remaining packages.
 .PP
-Repository configuration, GPG keys, and local package caches can also be
-transferred. Repository and cache migration are enabled by default and can
-be disabled independently.
-.PP
-By default, the source container is not modified. The destination is created
-as a separate container.
+Repositories, GPG keys, and local caches can also be transferred. The source container remains 
+unmodified during standard operations (though optional local RPM reconstruction via 
+\fB--rebuild-local\fP may install \fBrpmrebuild\fP into it if missing), and the destination 
+is created as an isolated container.
 
 .\" ============================================================================
 .SH OPTIONS
 .\" ============================================================================
 
-.SS Destination
+.SS Destination Setup
 
 .TP
 .BR \-d ", " \-\-distro " " DISTRO
-Specify the distribution for the destination container.
-This option is required.
+The distribution for your new destination container.
+This option is required (unless a custom image is provided via \fB--image\fP).
 .IP
-Must be a distribution natively supported by
-.BR toolbox\-create (1):
+Supported default distributions include:
 .BR fedora ,
 .BR rhel ,
 .BR ubuntu ,
-or
+and
 .BR arch .
+If an unsupported distribution is specified in an interactive terminal, 
+you will be prompted to supply a custom container image reference.
 
 .TP
 .BR \-r ", " \-\-release " " RELEASE
-Specify the distribution release for the destination container.
-This option is required.
+The release version or codename for the destination container
+(such as \fI45\fP for Fedora or \fInoble\fP for Ubuntu).
+Required for versioned distributions; omitted or ignored for rolling-release distributions like Arch.
+Automatically ignored or overridden if a custom container image is specified.
 
-.SS Migration
+.TP
+.BR \-i ", " \-\-image " " IMAGE
+Specify a custom container image reference (such as \fIquay.io/rockylinux/rockylinux:9\fP) 
+when using a distribution that is not natively supported or when overriding defaults.
+Triggers an immediate pre-flight container inspection to validate package manager 
+compatibility before any layers are pulled or allocated.
+
+.SS Migration Behavior
 
 .TP
 .BR \-n ", " \-\-dry\-run
-Run in dry-run mode. Source package, repository, and cache data are still
-exported, but the destination is not created,
-.B rpmrebuild
-is not run, and packages are not installed.
-.IP
-Package comparison uses an empty destination package list, so the displayed
-package count is not a prediction of the final installation count.
+Preview the migration safely.
+.B box-migrate
+will inspect the source and export data, but it will not create the destination 
+container or install any packages.
 
 .TP
 .BR \-R ", " \-\-repos
-Enable migration of repository configuration and GPG keys.
-This is the default.
+Migrate custom repositories and GPG keys, updating version numbers so they match 
+your new release.
+This is enabled by default.
 
 .TP
 .B \-\-no\-repos
-Disable repository configuration and GPG key migration.
+Disable repository and GPG key migration.
 
 .TP
 .BR \-C ", " \-\-cache
-Enable migration of local package caches.
-This is the default.
+Migrate local package caches to help with offline or manual package installation.
+This is enabled by default.
 
 .TP
 .B \-\-no\-cache
-Disable local package cache migration.
+Disable package cache migration.
 
 .TP
 .BR \-L ", " \-\-rebuild\-local
-Rebuild and migrate standalone local RPM packages (installed from
-.I @commandline
-without an associated repository) using
+Rebuild and migrate standalone local RPM packages (one-off files installed without 
+an associated repository) using
 .BR rpmrebuild (1)
 via
 .BR sudo (8).
 .IP
-This option is disabled by default and applies only to DNF-based
-distributions. If
-.B rpmrebuild
-is not already present in the source container, it will be installed there
-before rebuilding the packages.
+This applies only to DNF-based distributions and is disabled by default.
 
 .TP
 .BR \-w ", " \-\-workdir " " DIR
-Specify the working directory used to store exported package lists,
-repository archives, package caches, rebuilt RPMs, and migration reports.
+Specify a custom directory to store logs, manifests, and archives.
 .IP
 By default, files are saved to
-.IR ~/box-migrate-SOURCE-to-DESTINATION/ ,
-appending a numbered suffix
-.RI ( \-1 ,
-.IR \-2 ,
-and so on) if the directory already exists. When
-.B \-\-workdir
-is specified, the given directory is used directly and created if it does
-not exist. Because Toolbox containers mount your home directory, choose a
-path inside
-.I $HOME
-so container commands can write to it.
+.IR ~/box-migrate-SOURCE-to-DESTINATION/ .
 
 .SS General
 
 .TP
 .BR \-h ", " \-\-help
-Display the usage information and exit.
-
-.\" ============================================================================
-.SH EXAMPLES
-.\" ============================================================================
-
-.TP
-.B Migrate Fedora 44 to Fedora 45
-.nf
-box-migrate fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45
-.fi
-
-.TP
-.B Preview a Fedora migration
-.nf
-box-migrate fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45 --dry-run
-.fi
-
-.TP
-.B Migrate and rebuild standalone local RPMs on Fedora
-.nf
-box-migrate fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45 --rebuild-local
-.fi
-
-.TP
-.B Migrate RHEL and save logs to a custom directory
-.nf
-box-migrate rhel-toolbox-9.4 rhel-toolbox-9.5 -d rhel -r 9.5 -w ~/migrations/rhel-9.5
-.fi
-
-.TP
-.B Migrate Ubuntu without package caches
-.nf
-box-migrate ubuntu-toolbox-22.04 ubuntu-toolbox-24.04 --distro ubuntu --release 24.04 --no-cache
-.fi
-
-.TP
-.B Migrate Arch Linux without repositories
-.nf
-box-migrate arch-toolbox-latest arch-toolbox-2026 -d arch -r latest --no-repos
-.fi
-
-.TP
-.B Skip both repositories and caches
-.nf
-box-migrate fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45 --no-repos --no-cache
-.fi
+Display usage information and exit.
 
 .\" ============================================================================
 .SH SUPPORTED DISTRIBUTIONS
 .\" ============================================================================
 
 .B box-migrate
-supports only the distributions supported out of the box by
-.BR toolbox\-create (1).
-Custom container images (such as Debian, Rocky Linux, or AlmaLinux) are not
-currently supported.
+migrates containers within the same package manager family (APT, DNF, or Pacman). 
+Cross-family migrations are automatically caught and aborted during pre-flight checks.
+.PP
+Container ancestry (\fBID\fR and \fBID_LIKE\fP fields in \fI/etc/os-release\fP) is used 
+to support derivative distributions automatically.
 
 .TP
-.B DNF
+.B DNF (RPM-based)
+Natively supports
 .B fedora
 and
 .B rhel
-(allowing migrations such as
-.B fedora
-to
-.BR fedora ,
-or
-.B rhel
-to
-.BR rhel ).
+as default distributions, alongside DNF-based custom images (such as Rocky Linux or AlmaLinux).
 
 .TP
-.B APT
+.B APT (Debian-based)
+Natively supports
 .B ubuntu
-
-.TP
-.B Pacman
-.B arch
-
-.PP
-Cross-family package migration is not supported. Both containers must use
-the same package manager.
-
-.\" ============================================================================
-.SH MIGRATION DETAILS
-.\" ============================================================================
-
-.SS Packages
-
-The source package list is obtained using the package manager's manually
-installed package records. Packages already installed in the destination
-(matched by exact package name) are excluded from the installation list.
-.PP
-Package availability depends on the destination distribution and its
-configured repositories. Packages that are unavailable in the destination
-repositories are filtered out or skipped (via
-.B \-\-skip\-unavailable
-on DNF, or pre-installation repository candidate checks on APT and Pacman)
-and logged in the migration reports so remaining valid packages can still be
-installed.
-
-.SS Standalone local RPMs
-
-On DNF-based distributions, user-installed packages originating from
-.I @commandline
-(such as one-off local
-.I .rpm
-files installed without an accompanying repository) are detected and listed
-in
-.IR special\-cases.txt .
-.PP
-By default, these packages are not automatically rebuilt, leaving the source
-container untouched so you can either download an updated package for the
-destination release or reinstall manually.
-.PP
-When
-.B \-\-rebuild\-local
-is specified, standalone local packages are excluded from the standard
-repository installation pass. Instead,
-.B box\-migrate
-reconstructs binary
-.I .rpm
-archives (matched by
-.IR name.arch )
-from the installed files in the source container via
-.B sudo rpmrebuild
-(so restricted root-owned files can be read) and installs them into the
-destination container. Any packages that fail to rebuild are recorded in
-.IR special\-cases.txt .
-
-.SS Repositories and GPG keys
-
-When repository migration is enabled, custom repository configuration and
-associated key files are archived from the source and extracted into the
-destination (excluding default Fedora and Ubuntu base repository files).
-.PP
-For DNF-based distributions, release-prefixed source version strings
-(such as
-.IR fedora-44 ,
-.IR fc44 ,
-or
-.IR el9 )
-in repository URL fields
-.RI ( baseurl ,
-.IR mirrorlist ,
 and
-.IR metalink )
-in imported
-.I .repo
-files are automatically normalized to
-.I $releasever
-so they resolve against the destination release.
-.PP
-For APT-based distributions (Ubuntu), imported third-party repository
-definitions in
-.I /etc/apt/sources.list.d/
-have occurrences of the source release codename (such as
-.IR jammy )
-updated to match the destination release codename (such as
-.IR noble ).
-.PP
-However, third-party repository definitions are not guaranteed to support
-the destination release. Review imported repository files and their signing
-keys before trusting them in the destination container.
+.B debian
+as default/custom targets, alongside APT-compatible derivatives.
 
-.SS Package caches
-
-When cache migration is enabled, locally cached package files are archived
-from the source and extracted into the destination when cached package files
-are present. Cached files are not guaranteed to be usable by the destination
-package manager or compatible with its release.
+.TP
+.B Pacman (Arch-based)
+Natively supports
+.B arch
+and compatible Arch derivatives.
 
 .\" ============================================================================
-.SH FILES
+.SH EXAMPLES
 .\" ============================================================================
 
 .TP
-.I ~/box-migrate-SOURCE-to-DESTINATION/
-Default working directory containing exported package lists, repository
-archives, package caches, rebuilt RPMs, and migration reports (unless
-overridden with
-.BR \-w / \-\-workdir ).
-.IP
-If the default working directory already exists, a numbered suffix
-.RI ( \-1 ,
-.IR \-2 ,
-etc.) is added.
-
-.PP
-Important generated files include:
+.B Upgrade a standard Fedora container
+.nf
+box-migrate fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45
+.fi
 
 .TP
-.I packages.txt
-List of repository packages selected for migration.
+.B Migrate an Arch container (rolling release, no release flag needed)
+.nf
+box-migrate arch-source arch-dest -d arch
+.fi
 
 .TP
-.I report.txt
-Package installation output, when an installation is attempted.
+.B Migrate using a custom container image
+.nf
+box-migrate deb-source rocky-dest -i quay.io/rockylinux/rockylinux:9 -L
+.fi
 
 .TP
-.I special-cases.txt
-Summary of detected missing packages, dependency or transaction issues, and
-(on DNF-based distributions) standalone local RPMs, including rebuild
-successes and failures when
-.B \-\-rebuild\-local
-is used.
-
-.TP
-.I repositories.tar.gz
-Exported repository configuration and key archive.
-
-.TP
-.I package-cache.tar.gz
-Exported local package cache archive.
-
-.TP
-.I local-rpms/
-Directory containing reconstructed
-.I .rpm
-files when
-.B \-\-rebuild\-local
-is used.
-
-.\" ============================================================================
-.SH REQUIREMENTS
-.\" ============================================================================
-
-.B box-migrate
-requires:
-
-.IP \(bu 2
-Toolbox.
-
-.IP \(bu 2
-Podman.
-
-.IP \(bu 2
-Bash.
-
-.IP \(bu 2
-A working source Toolbox container.
-
-.PP
-The source and destination container names must differ, and the destination
-container name must not already exist.
-
-.\" ============================================================================
-.SH EXIT STATUS
-.\" ============================================================================
-
-.TP
-.B 0
-The script completed successfully (even if individual unavailable packages
-were skipped and logged).
-
-.TP
-.B Non-zero
-An error occurred during argument validation, container inspection, creation,
-or another pre-installation operation.
-.IP
-If a non-zero exit status occurs after the destination container has already
-been created,
-.B box-migrate
-prints the failing line number and exit code along with a
-.B toolbox rm -f
-cleanup hint. Inspect the migration logs and container state before retrying.
-
-.\" ============================================================================
-.SH NOTES
-.\" ============================================================================
-
-The source container is retained after migration. Box-Migrate does not
-remove or replace it, and does not modify it unless
-.B \-\-rebuild\-local
-needs to install
-.B rpmrebuild
-inside the source container.
-.PP
-The destination may be created successfully even if some packages are
-unavailable or incompatible. Review the installation report and
-special-cases report after migration.
-.PP
-Dry-run mode does not create the destination or install packages. It still
-creates a working directory and exports data from the source.
-.PP
-Repository and GPG key archives should be reviewed before being trusted in
-the destination.
+.B Preview a migration safely
+.nf
+box-migrate fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45 --dry-run
+.fi
 
 .\" ============================================================================
 .SH SEE ALSO
@@ -421,7 +185,5 @@ the destination.
 .BR toolbox (1),
 .BR podman (1),
 .BR dnf (8),
-.BR rpmrebuild (1),
-.BR sudo (8),
 .BR apt (8),
 .BR pacman (8)
