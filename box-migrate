@@ -38,7 +38,7 @@ trap 'on_err $LINENO' ERR
 
 tar_has_files() {
     local archive="$1"
-    [[ -s "$archive" ]] && tar -tzf "$archive" 2>/dev/null \vert{} grep -q '[^/]$'
+    [[ -s "$archive" ]] && tar -tzf "$archive" 2>/dev/null | grep -q '[^/]$'
 }
 
 usage() {
@@ -71,8 +71,10 @@ Supported Distributions:
 
 Examples:
   $cmd fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45 --dry-run
-  $cmd fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45 --rebuild-local$cmd rhel-toolbox-9.4 rhel-toolbox-9.5 -d rhel -r 9.5 -w ~/migrations/rhel-9.5
-  $cmd ubuntu-toolbox-22.04 ubuntu-toolbox-24.04 --distro ubuntu --release 24.04 --no-cache$cmd arch-toolbox-latest arch-toolbox-2026 -d arch -r latest --no-repos
+  $cmd fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45 --rebuild-local
+  $cmd rhel-toolbox-9.4 rhel-toolbox-9.5 -d rhel -r 9.5 -w ~/migrations/rhel-9.5
+  $cmd ubuntu-toolbox-22.04 ubuntu-toolbox-24.04 --distro ubuntu --release 24.04 --no-cache
+  $cmd arch-toolbox-latest arch-toolbox-2026 -d arch -r latest --no-repos
 USAGE
 }
 
@@ -178,11 +180,11 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     DRY_RUN_LABEL="[DRY-RUN MODE]"
 fi
 
-log "Toolbox Migrate v$VERSION${DRY_RUN_LABEL:+$DRY_RUN_LABEL}"
+log "Toolbox Migrate v$VERSION${DRY_RUN_LABEL:+ $DRY_RUN_LABEL}"
 log "Source: $SOURCE"
 log "Destination: $DEST"
 log "Workdir: $WORKDIR"
-log "Options -> Repos: $INCLUDE_REPOS - Cache: $INCLUDE_CACHE - Rebuild local RPMs:$REBUILD_LOCAL"
+log "Options -> Repos: $INCLUDE_REPOS - Cache: $INCLUDE_CACHE - Rebuild local packages: $REBUILD_LOCAL"
 
 # Match exact container name (column 2 of `toolbox list -c`)
 toolbox list -c | awk 'NR>1 {print $2}' | grep -Fxq "$SOURCE" \
@@ -197,7 +199,7 @@ OS_INFO=$(toolbox run --container "$SOURCE" -- cat /etc/os-release)
 SOURCE_ID=$(printf '%s\n' "$OS_INFO" | sed -n 's/^ID=//p' | tr -d '"')
 SOURCE_VERSION=$(printf '%s\n' "$OS_INFO" | sed -n 's/^VERSION_ID=//p' | tr -d '"')
 SOURCE_CODENAME=$(printf '%s\n' "$OS_INFO" | sed -n 's/^VERSION_CODENAME=//p' | tr -d '"')
-log "Detected: $SOURCE_ID$SOURCE_VERSION"
+log "Detected: $SOURCE_ID $SOURCE_VERSION"
 
 log "Exporting source package list..."
 case "$SOURCE_ID" in
@@ -289,7 +291,7 @@ if [[ "$REBUILD_LOCAL" -eq 1 && -s "$LOCAL_RPMS_LIST" ]]; then
                 ok "Rebuilt local RPM: $local_pkg"
                 echo "$local_pkg" >> "$REBUILT_OK_LIST"
             else
-                err_line=$(printf '\%s\n' "$rebuild_out" | grep -E 'ERROR|error:' | tail -n 1 || true)
+                err_line=$(printf '%s\n' "$rebuild_out" | grep -E 'ERROR|error:' | tail -n 1 || true)
                 warn "Failed to rebuild local RPM: $local_pkg ${err_line:+($err_line)}"
                 echo "$local_pkg${err_line:+ — $err_line}" >> "$REBUILT_FAIL_LIST"
             fi
@@ -299,7 +301,7 @@ fi
 
 DEST_CODENAME=""
 if [[ "$DRY_RUN" -eq 1 ]]; then
-    log "[DRY-RUN] Would create destination container: toolbox create --container $DEST --distro $DISTRO --release$RELEASE"
+    log "[DRY-RUN] Would create destination container: toolbox create --container $DEST --distro $DISTRO --release $RELEASE"
     log "[DRY-RUN] Simulating destination package manager inspection..."
     DEST_ID="$DISTRO"
     case "$DEST_ID" in
@@ -315,8 +317,8 @@ else
     ok "Destination container created."
 
     DEST_INFO=$(toolbox run --container "$DEST" -- cat /etc/os-release)
-    DEST_ID=$(printf '\%s\n' "$DEST_INFO" | sed -n 's/^ID=//p' | tr -d '"')
-    DEST_CODENAME=$(printf '\%s\n' "$DEST_INFO" | sed -n 's/^VERSION_CODENAME=//p' | tr -d '"')
+    DEST_ID=$(printf '%s\n' "$DEST_INFO" | sed -n 's/^ID=//p' | tr -d '"')
+    DEST_CODENAME=$(printf '%s\n' "$DEST_INFO" | sed -n 's/^VERSION_CODENAME=//p' | tr -d '"')
 
     case "$DEST_ID" in
         fedora|rhel) DEST_PM="dnf" ;;
@@ -327,7 +329,7 @@ else
 fi
 
 if [[ "$PM" != "$DEST_PM" ]]; then
-    fail "Package managers differ ($PM vs$DEST_PM). Cross-family migrations cannot auto-install packages directly."
+    fail "Package managers differ ($PM vs $DEST_PM). Cross-family migrations cannot auto-install packages directly."
 fi
 
 if [[ "$INCLUDE_REPOS" -eq 1 ]] && tar_has_files "$REPOS"; then
@@ -338,12 +340,14 @@ if [[ "$INCLUDE_REPOS" -eq 1 ]] && tar_has_files "$REPOS"; then
         toolbox run --container "$DEST" -- \
             sudo bash -c 'tar xzf - -C /' < "$REPOS" 2>/dev/null || true
 
-        if [[ "$DEST_PM" == "dnf" && -n "$SOURCE_VERSION" ]]; then
+        if [[ "$DEST_PM" == "dnf" && "$SOURCE_VERSION" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            ESCAPED_VER="${SOURCE_VERSION//./\\.}"
+            MAJOR_VER="${SOURCE_VERSION%%.*}"
             toolbox run --container "$DEST" -- \
-                sudo bash -c "sed -i -E '/^(baseurl|mirrorlist|metalink)=/ s/(fedora[-/]|fc|el)${SOURCE_VERSION}([-/]\vert{}$)/\1\$releasever\2/g' /etc/yum.repos.d/*.repo 2>/dev/null || true"
+                sudo bash -c "sed -i -E '/^(baseurl|mirrorlist|metalink)=/ s/(fedora[-/]|fc|el)(${ESCAPED_VER}|${MAJOR_VER})([-/&]|$)/\1\$releasever\3/g' /etc/yum.repos.d/*.repo 2>/dev/null || true"
         fi
 
-        if [[ "$DEST_PM" == "apt" && -n "$SOURCE_CODENAME" && -n "$DEST_CODENAME" && "$SOURCE_CODENAME" != "$DEST_CODENAME" ]]; then
+        if [[ "$DEST_PM" == "apt" && "$SOURCE_CODENAME" =~ ^[a-z0-9-]+$ && "$DEST_CODENAME" =~ ^[a-z0-9-]+$ && "$SOURCE_CODENAME" != "$DEST_CODENAME" ]]; then
             toolbox run --container "$DEST" -- \
                 sudo bash -c "sed -i -E 's/\b${SOURCE_CODENAME}\b/${DEST_CODENAME}/g' /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null || true"
         fi
@@ -410,15 +414,40 @@ if [[ "$PACKAGE_COUNT" -gt 0 ]]; then
                     2>&1 | tee "$REPORT" || true
                 ;;
             apt)
-                toolbox run --container "$DEST" -- sudo apt-get update
-                toolbox run --container "$DEST" -- \
-                    sudo apt-get install -y --no-install-recommends "${PKG_ARRAY[@]}" \
-                    2>&1 | tee "$REPORT" || true
+                toolbox run --container "$DEST" -- sudo apt-get update \
+                    2>&1 | tee "$REPORT" || warn "apt-get update reported repository errors; continuing with available sources."
+                VALID_APT_PKGS=()
+                for pkg in "${PKG_ARRAY[@]}"; do
+                    cand=$(toolbox run --container "$DEST" -- apt-cache policy "$pkg" </dev/null 2>/dev/null \
+                        | awk '/Candidate:/ {print $2; exit}' || true)
+                    if [[ -n "$cand" && "$cand" != "(none)" ]]; then
+                        VALID_APT_PKGS+=("$pkg")
+                    else
+                        printf 'E: Unable to locate package %s\n' "$pkg" | tee -a "$REPORT" >&2
+                    fi
+                done
+                if [[ "${#VALID_APT_PKGS[@]}" -gt 0 ]]; then
+                    toolbox run --container "$DEST" -- \
+                        sudo apt-get install -y --no-install-recommends "${VALID_APT_PKGS[@]}" \
+                        2>&1 | tee -a "$REPORT" || true
+                fi
                 ;;
             pacman)
-                toolbox run --container "$DEST" -- \
-                    sudo pacman -Sy --needed --noconfirm --asexplicit \
-                    "${PKG_ARRAY[@]}" 2>&1 | tee "$REPORT" || true
+                toolbox run --container "$DEST" -- sudo pacman -Sy --noconfirm \
+                    2>&1 | tee "$REPORT" || warn "pacman -Sy reported sync errors; continuing with available sources."
+                VALID_PACMAN_PKGS=()
+                for pkg in "${PKG_ARRAY[@]}"; do
+                    if toolbox run --container "$DEST" -- pacman -Si "$pkg" </dev/null >/dev/null 2>&1; then
+                        VALID_PACMAN_PKGS+=("$pkg")
+                    else
+                        printf 'error: target not found: %s\n' "$pkg" | tee -a "$REPORT" >&2
+                    fi
+                done
+                if [[ "${#VALID_PACMAN_PKGS[@]}" -gt 0 ]]; then
+                    toolbox run --container "$DEST" -- \
+                        sudo pacman -S --needed --noconfirm --asexplicit \
+                        "${VALID_PACMAN_PKGS[@]}" 2>&1 | tee -a "$REPORT" || true
+                fi
                 ;;
         esac
     fi
@@ -454,9 +483,9 @@ describe_missing_pkg() {
         apt)
             local info url summary
             info=$(toolbox run --container "$SOURCE" -- \
-                dpkg-query -W -f='${Homepage}\t${binary:Summary}\n' "$pkg" </dev/null 2>/dev/null | head -n 1 || true)
+                dpkg-query -W -f='${Homepage}|${binary:Summary}\n' "$pkg" </dev/null 2>/dev/null | head -n 1 || true)
             if [[ -n "$info" ]]; then
-                IFS=$'\t' read -r url summary <<< "$info"
+                IFS='|' read -r url summary <<< "$info"
                 echo "  - $pkg"
                 echo "      URL:     ${url:-none}"
                 echo "      Summary: ${summary:-none}"
@@ -490,7 +519,7 @@ OTHER_ISSUES=""
             | sed -E "s/.*(No match for argument: |Unable to locate package |Package '|target not found: )//; s/' has no installation candidate//" \
             | awk '{print $1}' | sort -u > "$MISSING_PKGS_LIST" || true
 
-        OTHER_ISSUES=$(grep -E "Failed to resolve|conflicting requests" "$REPORT" || true)
+        OTHER_ISSUES=$(grep -E "Failed to resolve|conflicting requests|broken packages|not installable" "$REPORT" || true)
 
         if [[ -s "$MISSING_PKGS_LIST" ]]; then
             while IFS= read -r missing_pkg; do
@@ -511,25 +540,27 @@ OTHER_ISSUES=""
     else
         echo "No report generated."
     fi
-    echo ""
-    if [[ "$REBUILD_LOCAL" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
-        echo "[External / Local RPMs (Successfully Rebuilt via rpmrebuild)]:"
-        if [[ -s "$REBUILT_OK_LIST" ]]; then
-            cat "$REBUILT_OK_LIST"
+    if [[ "$PM" == "dnf" ]]; then
+        echo ""
+        if [[ "$REBUILD_LOCAL" -eq 1 && "$DRY_RUN" -eq 0 ]]; then
+            echo "[External / Local RPMs (Successfully Rebuilt via rpmrebuild)]:"
+            if [[ -s "$REBUILT_OK_LIST" ]]; then
+                cat "$REBUILT_OK_LIST"
+            else
+                echo "None."
+            fi
+            if [[ -s "$REBUILT_FAIL_LIST" ]]; then
+                echo ""
+                echo "[External / Local RPMs (Failed to Rebuild - Reinstall Manually)]:"
+                cat "$REBUILT_FAIL_LIST"
+            fi
         else
-            echo "None."
-        fi
-        if [[ -s "$REBUILT_FAIL_LIST" ]]; then
-            echo ""
-            echo "[External / Local RPMs (Failed to Rebuild - Reinstall Manually)]:"
-            cat "$REBUILT_FAIL_LIST"
-        fi
-    else
-        echo "[External / Local RPMs (Installed Without a Repo - Reinstall Manually or Use --rebuild-local)]:"
-        if [[ -s "$LOCAL_RPMS_LIST" ]]; then
-            cat "$LOCAL_RPMS_LIST"
-        else
-            echo "None detected."
+            echo "[External / Local RPMs (Installed Without a Repo - Reinstall Manually or Use --rebuild-local)]:"
+            if [[ -s "$LOCAL_RPMS_LIST" ]]; then
+                cat "$LOCAL_RPMS_LIST"
+            else
+                echo "None detected."
+            fi
         fi
     fi
 } > "$SPECIAL_CASES"
@@ -537,7 +568,7 @@ OTHER_ISSUES=""
 HAS_WARNINGS=0
 if [[ "$DRY_RUN" -eq 0 ]]; then
     [[ -s "$MISSING_PKGS_LIST" || -n "$OTHER_ISSUES" || -s "$REBUILT_FAIL_LIST" ]] && HAS_WARNINGS=1
-    [[ "$REBUILD_LOCAL" -eq 0 && -s "$LOCAL_RPMS_LIST" ]] && HAS_WARNINGS=1
+    [[ "$PM" == "dnf" && "$REBUILD_LOCAL" -eq 0 && -s "$LOCAL_RPMS_LIST" ]] && HAS_WARNINGS=1
 fi
 
 ok "Migration process finished."

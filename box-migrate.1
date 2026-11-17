@@ -220,9 +220,12 @@ installed package records. Packages already installed in the destination
 (matched by exact package name) are excluded from the installation list.
 .PP
 Package availability depends on the destination distribution and its
-configured repositories. Packages that are unavailable or incompatible are
-skipped when supported by the package manager and logged in the migration
-reports.
+configured repositories. Packages that are unavailable in the destination
+repositories are filtered out or skipped (via
+.B \-\-skip\-unavailable
+on DNF, or pre-installation repository candidate checks on APT and Pacman)
+and logged in the migration reports so remaining valid packages can still be
+installed.
 
 .SS Standalone local RPMs
 
@@ -325,9 +328,10 @@ Package installation output, when an installation is attempted.
 .TP
 .I special-cases.txt
 Summary of detected missing packages, dependency or transaction issues, and
-standalone local RPMs (including rebuild successes and failures when
+(on DNF-based distributions) standalone local RPMs, including rebuild
+successes and failures when
 .B \-\-rebuild\-local
-is used).
+is used.
 
 .TP
 .I repositories.tar.gz
