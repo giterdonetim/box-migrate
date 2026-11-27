@@ -25,12 +25,14 @@ the packages from an existing container, saving you from reinstalling everything
 Particularly useful on immutable systems like Fedora Silverblue, 
 .B box-migrate
 reads the packages explicitly installed in your source container, checks what is already 
-present in the new destination container, and installs the remaining packages.
+present in the new destination container, and installs the remaining packages using
+batch transactions with fallback handling for unavailable or conflicting packages.
 .PP
 Repositories, GPG keys, and local caches can also be transferred. The source container remains 
 unmodified during standard operations (though optional local RPM reconstruction via 
-\fB--rebuild-local\fP may install \fBrpmrebuild\fP into it if missing), and the destination 
-is created as an isolated container.
+\fB\-\-rebuild\-local\fP may install \fBrpmrebuild\fP into it if missing), and the destination 
+is created as an isolated container. Any skipped packages, dependency issues, rebuilt local RPM 
+results, and unresolved shared libraries are recorded in the working directory reports.
 
 .\" ============================================================================
 .SH OPTIONS
@@ -41,7 +43,7 @@ is created as an isolated container.
 .TP
 .BR \-d ", " \-\-distro " " DISTRO
 The distribution for your new destination container.
-This option is required (unless a custom image is provided via \fB--image\fP).
+This option is required (unless a custom image is provided via \fB\-\-image\fP).
 .IP
 Supported default distributions include:
 .BR fedora ,
@@ -98,9 +100,12 @@ Disable package cache migration.
 .BR \-L ", " \-\-rebuild\-local
 Rebuild and migrate standalone local RPM packages (one-off files installed without 
 an associated repository) using
-.BR rpmrebuild (1)
+.BR rpmrebuild (8)
 via
 .BR sudo (8).
+After installation in the destination container, files from rebuilt RPMs are checked 
+with \fBldd\fP(1) for missing shared libraries, and matching provider packages are 
+queried and installed when available.
 .IP
 This applies only to DNF-based distributions and is disabled by default.
 
@@ -151,6 +156,23 @@ Natively supports
 and compatible Arch derivatives.
 
 .\" ============================================================================
+.SH FILES
+.\" ============================================================================
+
+.TP
+.I packages.txt
+Filtered list of additional repository packages selected for installation in the destination container.
+.TP
+.I report.txt
+Full package manager installation log from the destination container.
+.TP
+.I special-cases.txt
+Summary of unavailable or conflicting packages, local RPM rebuild outcomes, and shared-library resolution results.
+.TP
+.I local-rpms/
+Directory containing reconstructed local RPM packages when \fB\-\-rebuild\-local\fP is used.
+
+.\" ============================================================================
 .SH EXAMPLES
 .\" ============================================================================
 
@@ -167,9 +189,9 @@ box-migrate arch-source arch-dest -d arch
 .fi
 
 .TP
-.B Migrate using a custom container image
+.B Migrate using a custom container image and rebuild local RPMs
 .nf
-box-migrate deb-source rocky-dest -i quay.io/rockylinux/rockylinux:9 -L
+box-migrate fedora-toolbox-44 rocky-dest -i quay.io/rockylinux/rockylinux:9 -L
 .fi
 
 .TP
@@ -184,6 +206,8 @@ box-migrate fedora-toolbox-44 fedora-toolbox-45 -d fedora -r 45 --dry-run
 
 .BR toolbox (1),
 .BR podman (1),
+.BR ldd (1),
 .BR dnf (8),
 .BR apt (8),
-.BR pacman (8)
+.BR pacman (8),
+.BR sudo (8)

@@ -201,6 +201,14 @@ LOCAL_RPMS_DIR="$WORKDIR/local-rpms"
 REBUILT_OK_LIST="$WORKDIR/rebuilt_ok.txt"
 REBUILT_FAIL_LIST="$WORKDIR/rebuilt_fail.txt"
 MISSING_PKGS_LIST="$WORKDIR/missing_pkgs.txt"
+MISSING_SO_LIST="$WORKDIR/missing_libs.txt"
+RESOLVED_SO_PKGS_LIST="$WORKDIR/resolved_lib_pkgs.txt"
+
+: > "$REBUILT_OK_LIST"
+: > "$REBUILT_FAIL_LIST"
+: > "$MISSING_PKGS_LIST"
+: > "$MISSING_SO_LIST"
+: > "$RESOLVED_SO_PKGS_LIST"
 
 DRY_RUN_LABEL=""
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -224,8 +232,8 @@ log "Inspecting source distribution environment..."
 OS_INFO=$(toolbox run --container "$SOURCE" -- cat /etc/os-release)
 SOURCE_ID=$(printf '%s\n' "$OS_INFO" | sed -n 's/^ID=//p' | tr -d '"' | tr -d "'")
 SOURCE_LIKE=$(printf '%s\n' "$OS_INFO" | sed -n 's/^ID_LIKE=//p' | tr -d '"' | tr -d "'")
-SOURCE_VERSION=$(printf '%s\n' "$OS_INFO" | sed -n 's/^VERSION_ID=//p' | tr -d '"')
-SOURCE_CODENAME=$(printf '%s\n' "$OS_INFO" | sed -n 's/^VERSION_CODENAME=//p' | tr -d '"')
+SOURCE_VERSION=$(printf '%s\n' "$OS_INFO" | sed -n 's/^VERSION_ID=//p' | tr -d '"' | tr -d "'")
+SOURCE_CODENAME=$(printf '%s\n' "$OS_INFO" | sed -n 's/^VERSION_CODENAME=//p' | tr -d '"' | tr -d "'")
 
 # Ancestry-based package manager detection via ID and ID_LIKE
 if [[ "$SOURCE_ID" =~ (fedora|rhel|centos|rocky|almalinux|oracle) || "$SOURCE_LIKE" =~ (fedora|rhel) ]]; then
@@ -245,8 +253,9 @@ case "$PM" in
     dnf)
         toolbox run --container "$SOURCE" -- \
             dnf repoquery --userinstalled --qf '%{name}\t%{name}.%{arch}\t%{from_repo}\n' \
+            | sed 's/\\t/\t/g' \
             > "$WORKDIR/source_repoquery.tsv"
-        cut -f1 "$WORKDIR/source_repoquery.tsv" > "$WORKDIR/source_all.txt"
+        cut -f1 "$WORKDIR/source_repoquery.tsv" | sort -u > "$WORKDIR/source_all.txt"
         awk -F'\t' '$3 == "@commandline" {print $2}' "$WORKDIR/source_repoquery.tsv" \
             | sort -u > "$LOCAL_RPMS_LIST" || true
         awk -F'\t' '$3 == "@commandline" {print $1}' "$WORKDIR/source_repoquery.tsv" \
@@ -310,8 +319,6 @@ if [[ "$REBUILD_LOCAL" -eq 1 && -s "$LOCAL_RPMS_LIST" ]]; then
     else
         log "Rebuilding standalone local RPMs from source container..."
         mkdir -p "$LOCAL_RPMS_DIR"
-        : > "$REBUILT_OK_LIST"
-        : > "$REBUILT_FAIL_LIST"
         if ! toolbox run --container "$SOURCE" -- command -v rpmrebuild >/dev/null 2>&1; then
             log "Installing rpmrebuild package in source container $SOURCE..."
             toolbox run --container "$SOURCE" -- sudo dnf install -y rpmrebuild
@@ -381,7 +388,7 @@ else
         DEST_INFO=$(toolbox run --container "$DEST" -- cat /etc/os-release)
         DEST_ID=$(printf '%s\n' "$DEST_INFO" | sed -n 's/^ID=//p' | tr -d '"' | tr -d "'")
         DEST_LIKE=$(printf '%s\n' "$DEST_INFO" | sed -n 's/^ID_LIKE=//p' | tr -d '"' | tr -d "'")
-        DEST_CODENAME=$(printf '%s\n' "$DEST_INFO" | sed -n 's/^VERSION_CODENAME=//p' | tr -d '"')
+        DEST_CODENAME=$(printf '%s\n' "$DEST_INFO" | sed -n 's/^VERSION_CODENAME=//p' | tr -d '"' | tr -d "'")
 
         if [[ "$DEST_ID" =~ (fedora|rhel|centos|rocky|almalinux|oracle) || "$DEST_LIKE" =~ (fedora|rhel) ]]; then
             DEST_PM="dnf"
@@ -442,6 +449,7 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
         dnf)
             toolbox run --container "$DEST" -- \
                 dnf repoquery --installed --qf '%{name}\n' \
+                | sed 's/\\n/\n/g' \
                 > "$WORKDIR/dest_installed.txt"
             ;;
         apt)
@@ -476,9 +484,17 @@ if [[ "$PACKAGE_COUNT" -gt 0 ]]; then
         log "Installing additional packages in destination container..."
         case "$DEST_PM" in
             dnf)
-                toolbox run --container "$DEST" -- \
-                    sudo dnf install -y --skip-unavailable "${PKG_ARRAY[@]}" \
-                    2>&1 | tee "$REPORT" || true
+                if ! toolbox run --container "$DEST" -- \
+                    sudo dnf install -y --skip-unavailable --skip-broken "${PKG_ARRAY[@]}" \
+                    2>&1 | tee -a "$REPORT"; then
+                    warn "Batch DNF transaction encountered issues; retrying packages individually..."
+                    for pkg in "${PKG_ARRAY[@]}"; do
+                        [[ -z "$pkg" ]] && continue
+                        toolbox run --container "$DEST" -- \
+                            sudo dnf install -y --skip-unavailable --skip-broken "$pkg" \
+                            </dev/null 2>&1 | tee -a "$REPORT" || true
+                    done
+                fi
                 ;;
             apt)
                 toolbox run --container "$DEST" -- sudo apt-get update \
@@ -525,8 +541,44 @@ if [[ "$REBUILD_LOCAL" -eq 1 && "$DRY_RUN" -eq 0 && -d "$LOCAL_RPMS_DIR" ]]; the
     if [[ "${#REBUILT_FILES[@]}" -gt 0 ]]; then
         log "Installing ${#REBUILT_FILES[@]} reconstructed local RPM(s) in destination..."
         toolbox run --container "$DEST" -- \
-            sudo dnf install -y --skip-unavailable "${REBUILT_FILES[@]}" \
-            2>&1 | tee "$REPORT" || true
+            sudo dnf install -y --skip-unavailable --skip-broken "${REBUILT_FILES[@]}" \
+            2>&1 | tee -a "$REPORT" || true
+
+        # Detect unrecorded dynamic library dependencies on files owned by rebuilt RPMs
+        for rpm_file in "${REBUILT_FILES[@]}"; do
+            rpm_name=$(rpm -qp --queryformat '%{NAME}\n' "$rpm_file" 2>/dev/null || true)
+            [[ -z "$rpm_name" ]] && continue
+            toolbox run --container "$DEST" -- bash -c '
+                rpm -ql "'"$rpm_name"'" 2>/dev/null | while IFS= read -r f; do
+                    [[ -f "$f" && -x "$f" ]] || [[ "$f" == *.so* ]] || continue
+                    ldd "$f" 2>/dev/null | awk "/=> not found/ {print \$1}"
+                done
+            ' >> "$MISSING_SO_LIST" || true
+        done
+        sort -u -o "$MISSING_SO_LIST" "$MISSING_SO_LIST"
+
+        if [[ -s "$MISSING_SO_LIST" ]]; then
+            warn "Detected missing shared libraries for rebuilt RPMs; resolving providers..."
+            while IFS= read -r lib_soname; do
+                [[ -z "$lib_soname" ]] && continue
+                prov=$(toolbox run --container "$DEST" -- \
+                    dnf repoquery --whatprovides "*/$lib_soname" --qf '%{name}\n' 2>/dev/null \
+                    | sort -u | head -n 1 || true)
+                if [[ -n "$prov" ]]; then
+                    printf '%s -> %s\n' "$lib_soname" "$prov" >> "$RESOLVED_SO_PKGS_LIST"
+                else
+                    printf '%s -> (no provider found)\n' "$lib_soname" >> "$RESOLVED_SO_PKGS_LIST"
+                fi
+            done < "$MISSING_SO_LIST"
+
+            mapfile -t SO_INSTALL_PKGS < <(awk -F' -> ' '$2 != "" && $2 != "(no provider found)" {print $2}' "$RESOLVED_SO_PKGS_LIST" | sort -u || true)
+            if [[ "${#SO_INSTALL_PKGS[@]}" -gt 0 ]]; then
+                log "Installing ${#SO_INSTALL_PKGS[@]} shared-library provider package(s) in destination..."
+                toolbox run --container "$DEST" -- \
+                    sudo dnf install -y --skip-unavailable --skip-broken "${SO_INSTALL_PKGS[@]}" \
+                    2>&1 | tee -a "$REPORT" || true
+            fi
+        fi
     fi
 fi
 
@@ -536,7 +588,8 @@ describe_missing_pkg() {
         dnf)
             local info repo url summary
             info=$(toolbox run --container "$SOURCE" -- \
-                dnf repoquery --installed --qf '%{from_repo}\t%{url}\t%{summary}' "$pkg" </dev/null 2>/dev/null | head -n 1 || true)
+                dnf repoquery --installed --qf '%{from_repo}\t%{url}\t%{summary}' "$pkg" </dev/null 2>/dev/null \
+                | sed 's/\\t/\t/g' | head -n 1 || true)
             if [[ -n "$info" ]]; then
                 IFS=$'\t' read -r repo url summary <<< "$info"
                 echo "  - $pkg"
@@ -621,6 +674,11 @@ OTHER_ISSUES=""
                 echo "[External / Local RPMs (Rebuild Failed — Manual Reinstallation Required)]:"
                 cat "$REBUILT_FAIL_LIST"
             fi
+            if [[ -s "$RESOLVED_SO_PKGS_LIST" ]]; then
+                echo ""
+                echo "[Rebuilt RPM Shared Library Resolution]:"
+                cat "$RESOLVED_SO_PKGS_LIST"
+            fi
         else
             echo "[External / Local RPMs (Installed Without a Repository — Reinstall Manually or Use --rebuild-local)]:"
             if [[ -s "$LOCAL_RPMS_LIST" ]]; then
@@ -634,7 +692,7 @@ OTHER_ISSUES=""
 
 HAS_WARNINGS=0
 if [[ "$DRY_RUN" -eq 0 ]]; then
-    [[ -s "$MISSING_PKGS_LIST" || -n "$OTHER_ISSUES" || -s "$REBUILT_FAIL_LIST" ]] && HAS_WARNINGS=1
+    [[ -s "$MISSING_PKGS_LIST" || -n "$OTHER_ISSUES" || -s "$REBUILT_FAIL_LIST" || -s "$MISSING_SO_LIST" ]] && HAS_WARNINGS=1
     [[ "$PM" == "dnf" && "$REBUILD_LOCAL" -eq 0 && -s "$LOCAL_RPMS_LIST" ]] && HAS_WARNINGS=1
 fi
 
